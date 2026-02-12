@@ -8,7 +8,10 @@ from collections import defaultdict
 
 # ============= KONFİGÜRASYON =============
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN', 'YOUR_DISCORD_BOT_TOKEN')
-API_BASE_URL = os.getenv('API_BASE_URL', 'http://your-server.com/casino')
+
+# API URL - Eğer Render'da host ediyorsan sunucu URL'ini gir
+# Eğer aynı sunucuda çalışıyorsa localhost kullan
+API_BASE_URL = os.getenv('API_BASE_URL', 'http://localhost:17091/casino')
 
 # Ses kanalı ID'leri (bunları kendi sunucunuzdan alın)
 VP_VOICE_CHANNEL_ID = int(os.getenv('VP_CHANNEL_ID', '0'))  # VP kazanma kanalı
@@ -27,7 +30,7 @@ intents.message_content = True
 intents.voice_states = True
 intents.members = True
 
-bot = commands.Bot(command_prefix='/', intents=intents)
+bot = commands.Bot(command_prefix='/', intents=intents, help_command=None)
 
 # Kullanıcı ses kanalı takibi
 user_voice_time = defaultdict(lambda: {'vp_start': None, 'gems_start': None})
@@ -279,17 +282,22 @@ async def check_rewards(ctx):
     
     await ctx.send(embed=embed)
 
-@bot.command(name='help')
-async def help_command(ctx):
-    """Yardım menüsü"""
+@bot.command(name='commands')
+async def commands_list(ctx):
+    """Komut listesi"""
     embed = discord.Embed(title="🤖 Bot Commands", color=discord.Color.blue())
     
     embed.add_field(name="/link <code>", value="Link your Growtopia account", inline=False)
     embed.add_field(name="/profile", value="Check your linked account", inline=False)
     embed.add_field(name="/rewards", value="View reward system info", inline=False)
-    embed.add_field(name="/help", value="Show this message", inline=False)
+    embed.add_field(name="/commands or /help", value="Show this message", inline=False)
     
     await ctx.send(embed=embed)
+
+@bot.command(name='help')
+async def help_command(ctx):
+    """Yardım menüsü"""
+    await commands_list(ctx)
 
 # ============= BOT BAŞLAT =============
 if __name__ == '__main__':
