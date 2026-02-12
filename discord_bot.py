@@ -4,26 +4,24 @@ from discord.ext import tasks
 import aiohttp
 import asyncio
 import os
-from datetime import datetime, timedelta
+from datetime import datetime
 from collections import defaultdict
 from aiohttp import web
 
-# ============= KONFİGÜRASYON =============
-DISCORD_TOKEN = os.getenv('DISCORD_TOKEN', 'YOUR_DISCORD_BOT_TOKEN')
+# ============= CONFIG =============
+DISCORD_TOKEN = os.getenv('DISCORD_TOKEN', 'YOUR_BOT_TOKEN')
+API_BASE_URL = os.getenv('API_BASE_URL', 'http://localhost:17091')  # Growtopia sunucunun URL'si
 
-# API URL - Eğer Render'da host ediyorsan sunucu URL'ini gir
-API_BASE_URL = os.getenv('API_BASE_URL', 'http://localhost:17091/casino')
-
-# Ses kanalı ID'leri (bunları kendi sunucunuzdan alın)
-VP_VOICE_CHANNEL_ID = int(os.getenv('VP_CHANNEL_ID', '0'))  # VP kazanma kanalı
-GEMS_VOICE_CHANNEL_ID = int(os.getenv('GEMS_CHANNEL_ID', '0'))  # Gems boost kanalı
+# Ses kanalları
+VP_CHANNEL_ID = int(os.getenv('VP_CHANNEL_ID', '0'))
+GEMS_CHANNEL_ID = int(os.getenv('GEMS_CHANNEL_ID', '0'))
 
 # Ödül ayarları
-VP_REWARD_AMOUNT = 10  # Her 5 dakikada kazanılan VP
-VP_REWARD_INTERVAL = 300  # 5 dakika (saniye)
-GEMS_BOOST_MULTIPLIER = 1.05  # 1.05x gems boost
-GEMS_BOOST_DURATION = 3600  # 1 saat (saniye)
-GEMS_CHECK_INTERVAL = 60  # Her dakika kontrol
+VP_AMOUNT = 10  # Her 5 dakikada
+VP_INTERVAL = 300  # 5 dakika
+GEMS_MULTIPLIER = 1.05  # 1.05x
+GEMS_DURATION = 3600  # 1 saat
+GEMS_REFRESH = 60  # Her dakika refresh
 
 # ============= BOT SETUP =============
 intents = discord.Intents.default()
@@ -31,269 +29,296 @@ intents.message_content = True
 intents.voice_states = True
 intents.members = True
 
-class MyBot(discord.Client):
+class RewardsBot(discord.Client):
     def __init__(self):
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
-        self.synced = False
-
+        
     async def setup_hook(self):
         await self.tree.sync()
         print("[BOT] Commands synced!")
 
-bot = MyBot()
+bot = RewardsBot()
 
-# Kullanıcı ses kanalı takibi
-user_voice_time = defaultdict(lambda: {'vp_start': None, 'gems_start': None})
+# Voice tracking
+user_voice_data = defaultdict(lambda: {'vp_start': None, 'gems_start': None})
 
-# ============= API FONKSİYONLARI =============
-async def api_request(endpoint, data):
-    """API'ye POST isteği gönder"""
+# ============= API =============
+async def api_call(endpoint, data):
+    """API çağrısı yap"""
     async with aiohttp.ClientSession() as session:
         try:
             url = f"{API_BASE_URL}{endpoint}"
-            print(f"[API] Calling {url} with data: {data}")
+            print(f"[API] POST {url}")
+            print(f"[API] Data: {data}")
+            
             async with session.post(url, json=data, headers={'Content-Type': 'application/json'}) as response:
                 result = await response.json()
                 print(f"[API] Response: {result}")
                 return result
         except Exception as e:
-            print(f"[API ERROR] {endpoint}: {e}")
+            print(f"[API ERROR] {e}")
             return {"success": False, "error": str(e)}
 
-async def verify_link_code(code, discord_id):
-    """Link kodunu doğrula"""
-    return await api_request('/api/discord/link/verify', {
+async def verify_code(code, discord_id):
+    """Kodu doğrula"""
+    return await api_call('/api/discord/verify', {
         'code': code,
         'discordID': str(discord_id)
     })
 
-async def get_linked_user(discord_id):
-    """Discord ID'den bağlı kullanıcıyı getir"""
-    return await api_request('/api/discord/user/get', {
+async def get_linked(discord_id):
+    """Bağlı hesabı getir"""
+    return await api_call('/api/discord/get', {
         'discordID': str(discord_id)
     })
 
-async def add_vp_reward(discord_id, amount):
-    """VP ödülü ekle"""
-    return await api_request('/api/discord/reward/vp', {
+async def add_vp(discord_id, amount):
+    """VP ekle"""
+    return await api_call('/api/discord/reward/vp', {
         'discordID': str(discord_id),
         'amount': amount
     })
 
 async def add_gems_boost(discord_id, multiplier, duration):
     """Gems boost ekle"""
-    return await api_request('/api/discord/reward/boost', {
+    return await api_call('/api/discord/reward/gems', {
         'discordID': str(discord_id),
         'multiplier': multiplier,
         'duration': duration
     })
 
-# ============= BOT EVENTS =============
+# ============= EVENTS =============
 @bot.event
 async def on_ready():
-    print(f'[BOT] Logged in as {bot.user.name} ({bot.user.id})')
-    print(f'[BOT] VP Channel: {VP_VOICE_CHANNEL_ID}')
-    print(f'[BOT] Gems Channel: {GEMS_VOICE_CHANNEL_ID}')
-    print(f'[BOT] API URL: {API_BASE_URL}')
-    print('[BOT] Starting voice tracking tasks...')
+    print(f'[BOT] Logged in as {bot.user.name}')
+    print(f'[BOT] VP Channel: {VP_CHANNEL_ID}')
+    print(f'[BOT] Gems Channel: {GEMS_CHANNEL_ID}')
+    print(f'[BOT] API: {API_BASE_URL}')
     
-    # Task'ları başlat
-    if not check_vp_rewards.is_running():
-        check_vp_rewards.start()
-    if not check_gems_boost.is_running():
-        check_gems_boost.start()
+    # Tasks başlat
+    if not vp_task.is_running():
+        vp_task.start()
+    if not gems_task.is_running():
+        gems_task.start()
     
     print('[BOT] Ready!')
 
 @bot.event
 async def on_voice_state_update(member, before, after):
-    """Ses kanalı değişikliklerini takip et"""
+    """Ses kanalı değişiklikleri"""
     if member.bot:
         return
     
     discord_id = str(member.id)
     now = datetime.now()
     
-    # VP kanalına katıldı
-    if after.channel and after.channel.id == VP_VOICE_CHANNEL_ID:
-        if user_voice_time[discord_id]['vp_start'] is None:
-            user_voice_time[discord_id]['vp_start'] = now
+    # VP kanalına girdi
+    if after.channel and after.channel.id == VP_CHANNEL_ID:
+        if user_voice_data[discord_id]['vp_start'] is None:
+            user_voice_data[discord_id]['vp_start'] = now
             print(f"[VP] {member.name} joined VP channel")
     
-    # VP kanalından ayrıldı
-    elif before.channel and before.channel.id == VP_VOICE_CHANNEL_ID:
-        user_voice_time[discord_id]['vp_start'] = None
+    # VP kanalından çıktı
+    elif before.channel and before.channel.id == VP_CHANNEL_ID:
+        user_voice_data[discord_id]['vp_start'] = None
         print(f"[VP] {member.name} left VP channel")
     
-    # Gems kanalına katıldı
-    if after.channel and after.channel.id == GEMS_VOICE_CHANNEL_ID:
-        if user_voice_time[discord_id]['gems_start'] is None:
-            user_voice_time[discord_id]['gems_start'] = now
+    # Gems kanalına girdi
+    if after.channel and after.channel.id == GEMS_CHANNEL_ID:
+        if user_voice_data[discord_id]['gems_start'] is None:
+            user_voice_data[discord_id]['gems_start'] = now
             print(f"[GEMS] {member.name} joined Gems channel")
             
-            # Hemen boost ver
-            result = await add_gems_boost(discord_id, GEMS_BOOST_MULTIPLIER, GEMS_BOOST_DURATION)
+            # Boost ver
+            result = await add_gems_boost(discord_id, GEMS_MULTIPLIER, GEMS_DURATION)
             if result.get('success'):
                 try:
-                    await member.send(f"💎 **Gems Boost Activated!**\n"
-                                    f"Multiplier: {GEMS_BOOST_MULTIPLIER}x\n"
-                                    f"Duration: {GEMS_BOOST_DURATION // 60} minutes")
+                    await member.send(
+                        f"💎 **Gems Boost Activated!**\n"
+                        f"• Multiplier: **{GEMS_MULTIPLIER}x**\n"
+                        f"• Duration: **{GEMS_DURATION // 60} minutes**\n"
+                        f"• GrowID: `{result.get('growID')}`"
+                    )
                 except:
                     pass
     
-    # Gems kanalından ayrıldı
-    elif before.channel and before.channel.id == GEMS_VOICE_CHANNEL_ID:
-        user_voice_time[discord_id]['gems_start'] = None
+    # Gems kanalından çıktı
+    elif before.channel and before.channel.id == GEMS_CHANNEL_ID:
+        user_voice_data[discord_id]['gems_start'] = None
         print(f"[GEMS] {member.name} left Gems channel")
 
 # ============= TASKS =============
-@tasks.loop(seconds=VP_REWARD_INTERVAL)
-async def check_vp_rewards():
-    """VP kanalındaki kullanıcılara ödül ver"""
+@tasks.loop(seconds=VP_INTERVAL)
+async def vp_task():
+    """VP ödülü ver"""
     try:
-        vp_channel = bot.get_channel(VP_VOICE_CHANNEL_ID)
-        if not vp_channel:
+        channel = bot.get_channel(VP_CHANNEL_ID)
+        if not channel:
             return
         
         now = datetime.now()
         
-        for member in vp_channel.members:
+        for member in channel.members:
             if member.bot:
                 continue
             
             discord_id = str(member.id)
-            start_time = user_voice_time[discord_id]['vp_start']
+            start_time = user_voice_data[discord_id]['vp_start']
             
             if start_time:
-                # 5 dakika geçti mi kontrol et
                 elapsed = (now - start_time).total_seconds()
                 
-                if elapsed >= VP_REWARD_INTERVAL:
-                    # Ödül ver
-                    result = await add_vp_reward(discord_id, VP_REWARD_AMOUNT)
+                if elapsed >= VP_INTERVAL:
+                    # VP ver
+                    result = await add_vp(discord_id, VP_AMOUNT)
                     
                     if result.get('success'):
-                        print(f"[VP REWARD] Gave {VP_REWARD_AMOUNT} VP to {member.name}")
+                        print(f"[VP] Gave {VP_AMOUNT} VP to {member.name}")
                         
                         try:
-                            await member.send(f"💰 **VP Earned!**\n"
-                                            f"You earned {VP_REWARD_AMOUNT} VP for staying in the voice channel!\n"
-                                            f"Total time: {int(elapsed / 60)} minutes")
+                            await member.send(
+                                f"💰 **VP Earned!**\n"
+                                f"• Amount: **+{VP_AMOUNT} VP**\n"
+                                f"• Total VP: **{result.get('totalVP')}**\n"
+                                f"• Time: **{int(elapsed / 60)} minutes**"
+                            )
                         except:
                             pass
                     else:
-                        error = result.get('error', 'Unknown error')
-                        if error == 'Not linked':
+                        if result.get('error') == 'Not linked':
                             try:
-                                await member.send("❌ **Account Not Linked**\n"
-                                                f"Link your account in-game with `/link` command first!")
+                                await member.send(
+                                    "❌ **Account Not Linked**\n"
+                                    "Use `/link` in Growtopia to get your code!\n"
+                                    "Then use `/verify <code>` here in Discord."
+                                )
                             except:
                                 pass
                     
-                    # Timer'ı sıfırla
-                    user_voice_time[discord_id]['vp_start'] = now
+                    # Timer reset
+                    user_voice_data[discord_id]['vp_start'] = now
     
     except Exception as e:
-        print(f"[VP REWARD ERROR] {e}")
+        print(f"[VP ERROR] {e}")
 
-@tasks.loop(seconds=GEMS_CHECK_INTERVAL)
-async def check_gems_boost():
-    """Gems kanalındaki kullanıcıların boost'unu yenile"""
+@tasks.loop(seconds=GEMS_REFRESH)
+async def gems_task():
+    """Gems boost'u refresh et"""
     try:
-        gems_channel = bot.get_channel(GEMS_VOICE_CHANNEL_ID)
-        if not gems_channel:
+        channel = bot.get_channel(GEMS_CHANNEL_ID)
+        if not channel:
             return
         
-        for member in gems_channel.members:
+        for member in channel.members:
             if member.bot:
                 continue
             
             discord_id = str(member.id)
             
-            # Boost'u yenile (süreyi uzat)
-            await add_gems_boost(discord_id, GEMS_BOOST_MULTIPLIER, GEMS_CHECK_INTERVAL)
+            # Boost'u uzat
+            await add_gems_boost(discord_id, GEMS_MULTIPLIER, GEMS_REFRESH)
     
     except Exception as e:
-        print(f"[GEMS BOOST ERROR] {e}")
+        print(f"[GEMS ERROR] {e}")
 
-# ============= SLASH COMMANDS =============
-@bot.tree.command(name='link', description='Link your Growtopia account to Discord')
-@app_commands.describe(code='The 6-digit code from in-game /link command')
-async def link_account(interaction: discord.Interaction, code: str):
-    """Discord hesabını Growtopia hesabına bağla"""
+# ============= COMMANDS =============
+@bot.tree.command(name='verify', description='Verify your link code from Growtopia')
+@app_commands.describe(code='6-digit code from /link command in-game')
+async def verify(interaction: discord.Interaction, code: str):
+    """Kodu doğrula"""
     await interaction.response.defer(ephemeral=True)
     
     code = code.upper().strip()
     discord_id = str(interaction.user.id)
     
-    print(f"[LINK CMD] User {interaction.user.name} trying code {code}")
+    print(f"[VERIFY] User {interaction.user.name} code {code}")
     
-    # Doğrula
-    result = await verify_link_code(code, discord_id)
+    result = await verify_code(code, discord_id)
     
     if result.get('success'):
-        username = result.get('username', 'Unknown')
-        await interaction.followup.send(
-            f"✅ **Account Linked Successfully!**\n"
-            f"Discord: {interaction.user.mention}\n"
-            f"Growtopia: `{username}`\n\n"
-            f"You can now earn rewards by joining voice channels!",
-            ephemeral=True
+        growid = result.get('growID')
+        
+        embed = discord.Embed(
+            title="✅ Account Linked!",
+            description=f"Successfully linked your accounts!",
+            color=discord.Color.green()
         )
+        embed.add_field(name="Discord", value=interaction.user.mention, inline=False)
+        embed.add_field(name="GrowID", value=f"`{growid}`", inline=False)
+        embed.add_field(
+            name="🎁 Rewards",
+            value=f"• Join <#{VP_CHANNEL_ID}> → Earn **{VP_AMOUNT} VP** every {VP_INTERVAL // 60} minutes\n"
+                  f"• Join <#{GEMS_CHANNEL_ID}> → Get **{GEMS_MULTIPLIER}x gems boost**",
+            inline=False
+        )
+        
+        await interaction.followup.send(embed=embed, ephemeral=True)
     else:
         error = result.get('error', 'Unknown error')
         await interaction.followup.send(
-            f"❌ **Link Failed**\n"
-            f"Error: {error}\n\n"
-            f"Make sure you:\n"
-            f"1. Used `/link` command in-game\n"
-            f"2. Copied the code correctly\n"
-            f"3. Used the code within 5 minutes",
+            f"❌ **Verification Failed**\n"
+            f"Error: `{error}`\n\n"
+            f"**Steps:**\n"
+            f"1. Use `/link` in Growtopia\n"
+            f"2. Copy the 6-digit code\n"
+            f"3. Use `/verify <code>` within 5 minutes",
             ephemeral=True
         )
 
-@bot.tree.command(name='profile', description='Check your linked account information')
-async def check_profile(interaction: discord.Interaction):
-    """Bağlı hesap bilgilerini görüntüle"""
+@bot.tree.command(name='profile', description='Check your linked account')
+async def profile(interaction: discord.Interaction):
+    """Profil göster"""
     await interaction.response.defer(ephemeral=True)
     
     discord_id = str(interaction.user.id)
     
-    result = await get_linked_user(discord_id)
+    result = await get_linked(discord_id)
     
     if result.get('success'):
-        username = result.get('username', 'Unknown')
-        balance = result.get('balance', 0)
+        growid = result.get('growID')
+        total_vp = result.get('totalVP', 0)
         
-        embed = discord.Embed(title="🎮 Profile", color=discord.Color.green())
+        embed = discord.Embed(
+            title="🎮 Your Profile",
+            color=discord.Color.blue()
+        )
         embed.add_field(name="Discord", value=interaction.user.mention, inline=False)
-        embed.add_field(name="Growtopia", value=f"`{username}`", inline=False)
-        embed.add_field(name="Balance", value=f"{balance:,} WL", inline=False)
+        embed.add_field(name="GrowID", value=f"`{growid}`", inline=False)
+        embed.add_field(name="Total VP Earned", value=f"**{total_vp:,}** VP", inline=False)
         
         await interaction.followup.send(embed=embed, ephemeral=True)
     else:
         await interaction.followup.send(
-            "❌ **Account Not Linked**\n"
-            f"Use `/link <code>` to link your account!\n"
-            f"Get code in-game with `/link` command.",
+            "❌ **Not Linked**\n"
+            "Use `/link` in Growtopia to get your code!\n"
+            "Then use `/verify <code>` here.",
             ephemeral=True
         )
 
-@bot.tree.command(name='rewards', description='View information about the reward system')
-async def check_rewards(interaction: discord.Interaction):
-    """Ödül sistemi hakkında bilgi"""
-    embed = discord.Embed(title="🎁 Reward System", color=discord.Color.gold())
+@bot.tree.command(name='rewards', description='View reward system information')
+async def rewards(interaction: discord.Interaction):
+    """Ödül bilgisi"""
+    embed = discord.Embed(
+        title="🎁 Discord Voice Rewards",
+        description="Earn rewards by joining voice channels!",
+        color=discord.Color.gold()
+    )
     
     embed.add_field(
         name="💰 VP Channel",
-        value=f"Join <#{VP_VOICE_CHANNEL_ID}> to earn {VP_REWARD_AMOUNT} VP every {VP_REWARD_INTERVAL // 60} minutes!",
+        value=f"<#{VP_CHANNEL_ID}>\n"
+              f"• Earn **{VP_AMOUNT} VP** every **{VP_INTERVAL // 60} minutes**\n"
+              f"• Stay in channel to earn!",
         inline=False
     )
     
     embed.add_field(
         name="💎 Gems Boost Channel",
-        value=f"Join <#{GEMS_VOICE_CHANNEL_ID}> to get {GEMS_BOOST_MULTIPLIER}x gems boost!",
+        value=f"<#{GEMS_CHANNEL_ID}>\n"
+              f"• Get **{GEMS_MULTIPLIER}x gems** multiplier\n"
+              f"• Boost lasts **{GEMS_DURATION // 60} minutes**\n"
+              f"• Automatically refreshed while in channel",
         inline=False
     )
     
@@ -301,32 +326,34 @@ async def check_rewards(interaction: discord.Interaction):
         name="📝 How to Start",
         value="1. Use `/link` in Growtopia\n"
               "2. Copy the 6-digit code\n"
-              "3. Use `/link <code>` here in Discord\n"
-              "4. Join voice channels to earn rewards!",
+              "3. Use `/verify <code>` in Discord\n"
+              "4. Join voice channels to earn!",
         inline=False
     )
     
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name='help', description='Show all available commands')
-async def help_command(interaction: discord.Interaction):
-    """Yardım menüsü"""
-    embed = discord.Embed(title="🤖 Bot Commands", color=discord.Color.blue())
+@bot.tree.command(name='help', description='Show all commands')
+async def help_cmd(interaction: discord.Interaction):
+    """Yardım"""
+    embed = discord.Embed(
+        title="🤖 Commands",
+        color=discord.Color.purple()
+    )
     
-    embed.add_field(name="/link <code>", value="Link your Growtopia account", inline=False)
-    embed.add_field(name="/profile", value="Check your linked account", inline=False)
+    embed.add_field(name="/verify <code>", value="Link your Growtopia account", inline=False)
+    embed.add_field(name="/profile", value="View your profile", inline=False)
     embed.add_field(name="/rewards", value="View reward system info", inline=False)
     embed.add_field(name="/help", value="Show this message", inline=False)
     
     await interaction.response.send_message(embed=embed)
 
-# ============= HEALTH CHECK HTTP SERVER =============
+# ============= HEALTH CHECK =============
 async def health_check(request):
-    """Render için health check endpoint"""
-    return web.Response(text="Discord bot is running!", status=200)
+    return web.Response(text="Bot is running!", status=200)
 
 async def start_http_server():
-    """Render için basit HTTP server (port binding için)"""
+    """HTTP server (Render için)"""
     app = web.Application()
     app.router.add_get('/', health_check)
     app.router.add_get('/health', health_check)
@@ -336,23 +363,21 @@ async def start_http_server():
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
-    print(f'[HTTP] Health check server running on port {port}')
+    print(f'[HTTP] Server on port {port}')
 
-# ============= BOT BAŞLAT =============
+# ============= MAIN =============
 async def main():
-    """Bot ve HTTP server'ı birlikte çalıştır"""
-    # HTTP server'ı başlat
     await start_http_server()
-    
-    # Bot'u başlat
     await bot.start(DISCORD_TOKEN)
 
 if __name__ == '__main__':
-    print("[BOT] Starting Discord bot...")
-    print(f"[BOT] API URL: {API_BASE_URL}")
+    print("[DISCORD REWARDS BOT] Starting...")
+    print(f"[CONFIG] API: {API_BASE_URL}")
+    print(f"[CONFIG] VP Channel: {VP_CHANNEL_ID}")
+    print(f"[CONFIG] Gems Channel: {GEMS_CHANNEL_ID}")
     
-    if DISCORD_TOKEN == 'YOUR_DISCORD_BOT_TOKEN':
-        print("[ERROR] Please set DISCORD_TOKEN environment variable!")
+    if DISCORD_TOKEN == 'YOUR_BOT_TOKEN':
+        print("[ERROR] Set DISCORD_TOKEN environment variable!")
     else:
         try:
             asyncio.run(main())
