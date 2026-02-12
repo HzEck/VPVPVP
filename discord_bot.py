@@ -5,6 +5,7 @@ import asyncio
 import os
 from datetime import datetime, timedelta
 from collections import defaultdict
+from aiohttp import web
 
 # ============= KONFİGÜRASYON =============
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN', 'YOUR_DISCORD_BOT_TOKEN')
@@ -299,7 +300,33 @@ async def help_command(ctx):
     """Yardım menüsü"""
     await commands_list(ctx)
 
+# ============= HEALTH CHECK HTTP SERVER =============
+async def health_check(request):
+    """Render için health check endpoint"""
+    return web.Response(text="Discord bot is running!", status=200)
+
+async def start_http_server():
+    """Render için basit HTTP server (port binding için)"""
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    app.router.add_get('/health', health_check)
+    
+    port = int(os.getenv('PORT', '10000'))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    print(f'[HTTP] Health check server running on port {port}')
+
 # ============= BOT BAŞLAT =============
+async def main():
+    """Bot ve HTTP server'ı birlikte çalıştır"""
+    # HTTP server'ı başlat
+    await start_http_server()
+    
+    # Bot'u başlat
+    await bot.start(DISCORD_TOKEN)
+
 if __name__ == '__main__':
     print("[BOT] Starting Discord bot...")
     print(f"[BOT] API URL: {API_BASE_URL}")
@@ -307,4 +334,7 @@ if __name__ == '__main__':
     if DISCORD_TOKEN == 'YOUR_DISCORD_BOT_TOKEN':
         print("[ERROR] Please set DISCORD_TOKEN environment variable!")
     else:
-        bot.run(DISCORD_TOKEN)
+        try:
+            asyncio.run(main())
+        except KeyboardInterrupt:
+            print("[BOT] Shutting down...")
