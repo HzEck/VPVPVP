@@ -1,5 +1,6 @@
 import discord
-from discord.ext import commands, tasks
+from discord import app_commands
+from discord.ext import tasks
 import aiohttp
 import asyncio
 import os
@@ -11,7 +12,6 @@ from aiohttp import web
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN', 'YOUR_DISCORD_BOT_TOKEN')
 
 # API URL - Eğer Render'da host ediyorsan sunucu URL'ini gir
-# Eğer aynı sunucuda çalışıyorsa localhost kullan
 API_BASE_URL = os.getenv('API_BASE_URL', 'http://localhost:17091/casino')
 
 # Ses kanalı ID'leri (bunları kendi sunucunuzdan alın)
@@ -31,7 +31,17 @@ intents.message_content = True
 intents.voice_states = True
 intents.members = True
 
-bot = commands.Bot(command_prefix='/', intents=intents, help_command=None)
+class MyBot(discord.Client):
+    def __init__(self):
+        super().__init__(intents=intents)
+        self.tree = app_commands.CommandTree(self)
+        self.synced = False
+
+    async def setup_hook(self):
+        await self.tree.sync()
+        print("[BOT] Commands synced!")
+
+bot = MyBot()
 
 # Kullanıcı ses kanalı takibi
 user_voice_time = defaultdict(lambda: {'vp_start': None, 'gems_start': None})
@@ -42,8 +52,11 @@ async def api_request(endpoint, data):
     async with aiohttp.ClientSession() as session:
         try:
             url = f"{API_BASE_URL}{endpoint}"
-            async with session.post(url, json=data) as response:
-                return await response.json()
+            print(f"[API] Calling {url} with data: {data}")
+            async with session.post(url, json=data, headers={'Content-Type': 'application/json'}) as response:
+                result = await response.json()
+                print(f"[API] Response: {result}")
+                return result
         except Exception as e:
             print(f"[API ERROR] {endpoint}: {e}")
             return {"success": False, "error": str(e)}
@@ -82,6 +95,7 @@ async def on_ready():
     print(f'[BOT] Logged in as {bot.user.name} ({bot.user.id})')
     print(f'[BOT] VP Channel: {VP_VOICE_CHANNEL_ID}')
     print(f'[BOT] Gems Channel: {GEMS_VOICE_CHANNEL_ID}')
+    print(f'[BOT] API URL: {API_BASE_URL}')
     print('[BOT] Starting voice tracking tasks...')
     
     # Task'ları başlat
@@ -122,7 +136,7 @@ async def on_voice_state_update(member, before, after):
             result = await add_gems_boost(discord_id, GEMS_BOOST_MULTIPLIER, GEMS_BOOST_DURATION)
             if result.get('success'):
                 try:
-                    await member.send(f"🎁 **Gems Boost Activated!**\n"
+                    await member.send(f"💎 **Gems Boost Activated!**\n"
                                     f"Multiplier: {GEMS_BOOST_MULTIPLIER}x\n"
                                     f"Duration: {GEMS_BOOST_DURATION // 60} minutes")
                 except:
@@ -203,40 +217,48 @@ async def check_gems_boost():
     except Exception as e:
         print(f"[GEMS BOOST ERROR] {e}")
 
-# ============= KOMUTLAR =============
-@bot.command(name='link')
-async def link_account(ctx, code: str = None):
+# ============= SLASH COMMANDS =============
+@bot.tree.command(name='link', description='Link your Growtopia account to Discord')
+@app_commands.describe(code='The 6-digit code from in-game /link command')
+async def link_account(interaction: discord.Interaction, code: str):
     """Discord hesabını Growtopia hesabına bağla"""
-    if not code:
-        await ctx.send("❌ **Usage:** `/link <code>`\n"
-                      "Get your code in-game with `/link` command!")
-        return
+    await interaction.response.defer(ephemeral=True)
     
     code = code.upper().strip()
-    discord_id = str(ctx.author.id)
+    discord_id = str(interaction.user.id)
+    
+    print(f"[LINK CMD] User {interaction.user.name} trying code {code}")
     
     # Doğrula
     result = await verify_link_code(code, discord_id)
     
     if result.get('success'):
         username = result.get('username', 'Unknown')
-        await ctx.send(f"✅ **Account Linked Successfully!**\n"
-                      f"Discord: {ctx.author.mention}\n"
-                      f"Growtopia: `{username}`\n\n"
-                      f"You can now earn rewards by joining voice channels!")
+        await interaction.followup.send(
+            f"✅ **Account Linked Successfully!**\n"
+            f"Discord: {interaction.user.mention}\n"
+            f"Growtopia: `{username}`\n\n"
+            f"You can now earn rewards by joining voice channels!",
+            ephemeral=True
+        )
     else:
         error = result.get('error', 'Unknown error')
-        await ctx.send(f"❌ **Link Failed**\n"
-                      f"Error: {error}\n\n"
-                      f"Make sure you:\n"
-                      f"1. Used `/link` command in-game\n"
-                      f"2. Copied the code correctly\n"
-                      f"3. Used the code within 5 minutes")
+        await interaction.followup.send(
+            f"❌ **Link Failed**\n"
+            f"Error: {error}\n\n"
+            f"Make sure you:\n"
+            f"1. Used `/link` command in-game\n"
+            f"2. Copied the code correctly\n"
+            f"3. Used the code within 5 minutes",
+            ephemeral=True
+        )
 
-@bot.command(name='profile')
-async def check_profile(ctx):
+@bot.tree.command(name='profile', description='Check your linked account information')
+async def check_profile(interaction: discord.Interaction):
     """Bağlı hesap bilgilerini görüntüle"""
-    discord_id = str(ctx.author.id)
+    await interaction.response.defer(ephemeral=True)
+    
+    discord_id = str(interaction.user.id)
     
     result = await get_linked_user(discord_id)
     
@@ -245,18 +267,21 @@ async def check_profile(ctx):
         balance = result.get('balance', 0)
         
         embed = discord.Embed(title="🎮 Profile", color=discord.Color.green())
-        embed.add_field(name="Discord", value=ctx.author.mention, inline=False)
+        embed.add_field(name="Discord", value=interaction.user.mention, inline=False)
         embed.add_field(name="Growtopia", value=f"`{username}`", inline=False)
         embed.add_field(name="Balance", value=f"{balance:,} WL", inline=False)
         
-        await ctx.send(embed=embed)
+        await interaction.followup.send(embed=embed, ephemeral=True)
     else:
-        await ctx.send("❌ **Account Not Linked**\n"
-                      f"Use `/link <code>` to link your account!\n"
-                      f"Get code in-game with `/link` command.")
+        await interaction.followup.send(
+            "❌ **Account Not Linked**\n"
+            f"Use `/link <code>` to link your account!\n"
+            f"Get code in-game with `/link` command.",
+            ephemeral=True
+        )
 
-@bot.command(name='rewards')
-async def check_rewards(ctx):
+@bot.tree.command(name='rewards', description='View information about the reward system')
+async def check_rewards(interaction: discord.Interaction):
     """Ödül sistemi hakkında bilgi"""
     embed = discord.Embed(title="🎁 Reward System", color=discord.Color.gold())
     
@@ -281,24 +306,19 @@ async def check_rewards(ctx):
         inline=False
     )
     
-    await ctx.send(embed=embed)
+    await interaction.response.send_message(embed=embed)
 
-@bot.command(name='commands')
-async def commands_list(ctx):
-    """Komut listesi"""
+@bot.tree.command(name='help', description='Show all available commands')
+async def help_command(interaction: discord.Interaction):
+    """Yardım menüsü"""
     embed = discord.Embed(title="🤖 Bot Commands", color=discord.Color.blue())
     
     embed.add_field(name="/link <code>", value="Link your Growtopia account", inline=False)
     embed.add_field(name="/profile", value="Check your linked account", inline=False)
     embed.add_field(name="/rewards", value="View reward system info", inline=False)
-    embed.add_field(name="/commands or /help", value="Show this message", inline=False)
+    embed.add_field(name="/help", value="Show this message", inline=False)
     
-    await ctx.send(embed=embed)
-
-@bot.command(name='help')
-async def help_command(ctx):
-    """Yardım menüsü"""
-    await commands_list(ctx)
+    await interaction.response.send_message(embed=embed)
 
 # ============= HEALTH CHECK HTTP SERVER =============
 async def health_check(request):
