@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: discord-voice-rewards-bot
+    env: python
+    buildCommand: "bash render_build.sh"
+    startCommand: "bash render_start.sh"
+    envVars:
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: API_BASE_URL
+        value: https://your-growtopia-server.com/casino
+      - key: VP_CHANNEL_ID
+        value: "0"
+      - key: GEMS_CHANNEL_ID
+        value: "0"
+      - key: PYTHON_VERSION
+        value: "3.11.0"
