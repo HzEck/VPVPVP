@@ -7,6 +7,7 @@ import os
 from datetime import datetime
 from collections import defaultdict
 from aiohttp import web
+import traceback
 
 # ============= CONFIG =============
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN', 'YOUR_BOT_TOKEN')
@@ -43,48 +44,63 @@ bot = RewardsBot()
 # Voice tracking
 user_voice_data = defaultdict(lambda: {'vp_start': None, 'gems_start': None})
 
-# ============= API (CASINO STYLE) =============
+# ============= API (IMPROVED ERROR HANDLING) =============
 async def api_call(endpoint, data):
     async with aiohttp.ClientSession() as session:
         try:
             url = f"{API_BASE_URL}{endpoint}"
-            print(f"[API] POST {url}")
-            print(f"[API] Data: {data}")
+            print(f"\n[API] >>> POST {url}")
+            print(f"[API] >>> Data: {data}")
             
             async with session.post(
                 url, 
                 json=data, 
-                headers={'Content-Type': 'application/json'}, 
-                timeout=aiohttp.ClientTimeout(total=10)
+                headers={'Content-Type': 'application/json'},
+                timeout=aiohttp.ClientTimeout(total=15)
             ) as response:
+                status = response.status
+                
+                # Get response text first
                 text = await response.text()
-                print(f"[API] Response ({response.status}): {text[:500]}")
+                print(f"[API] <<< Status: {status}")
+                print(f"[API] <<< Raw Response: {text[:500]}")
+                
+                # Handle empty response
+                if not text or text.strip() == "":
+                    print("[API] ERROR: Empty response from server")
+                    return {"success": False, "error": "Server returned empty response"}
                 
                 # Try to parse JSON
                 try:
-                    result = await response.json()
-                except:
-                    print(f"[API] Failed to parse JSON: {text[:200]}")
-                    return {"success": False, "error": f"Invalid response from server"}
+                    result = await response.json(content_type=None)  # Ignore content-type
+                    print(f"[API] <<< Parsed: {result}")
+                except Exception as parse_error:
+                    print(f"[API] ERROR: JSON parse failed - {parse_error}")
+                    print(f"[API] ERROR: Raw text: {text}")
+                    return {"success": False, "error": f"Invalid JSON response: {text[:100]}"}
                 
-                # Handle status codes
-                if response.status == 403:
-                    return {"success": False, "error": result.get('error', 'Invalid or expired code')}
-                elif response.status == 400:
+                # Handle HTTP errors
+                if status == 403:
+                    return {"success": False, "error": result.get('error', 'Forbidden')}
+                elif status == 400:
                     return {"success": False, "error": result.get('error', 'Bad request')}
-                elif response.status == 404:
+                elif status == 404:
                     return {"success": False, "error": result.get('error', 'Not found')}
-                elif response.status != 200:
-                    return {"success": False, "error": f"Server error ({response.status})"}
+                elif status >= 400:
+                    return {"success": False, "error": f"Server error ({status}): {result.get('error', 'Unknown')}"}
                 
                 return result
                     
         except asyncio.TimeoutError:
-            print(f"[API ERROR] Timeout")
-            return {"success": False, "error": "Connection timeout"}
+            print(f"[API] ERROR: Request timeout")
+            return {"success": False, "error": "Connection timeout - server not responding"}
+        except aiohttp.ClientError as e:
+            print(f"[API] ERROR: Connection failed - {type(e).__name__}: {e}")
+            return {"success": False, "error": f"Connection failed: {str(e)}"}
         except Exception as e:
-            print(f"[API ERROR] {type(e).__name__}: {e}")
-            return {"success": False, "error": str(e)}
+            print(f"[API] ERROR: Unexpected error - {type(e).__name__}: {e}")
+            traceback.print_exc()
+            return {"success": False, "error": f"Unexpected error: {str(e)}"}
 
 async def get_profile(discord_id):
     return await api_call('/api/discord/get', {'discordID': str(discord_id)})
@@ -102,7 +118,7 @@ async def add_gems_boost(discord_id, multiplier, duration):
         'duration': duration
     })
 
-# ============= BUTTON VIEW (CASINO STYLE: USERNAME + CODE) =============
+# ============= BUTTON VIEW =============
 class LinkButton(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -135,18 +151,26 @@ class LinkModal(discord.ui.Modal, title="Link Your Account"):
         username = self.username_input.value.strip()
         code = self.code_input.value.strip()
         
-        print(f"[LINK] User {interaction.user.name} trying - Username: {username} | Code: {code}")
+        print(f"\n{'='*60}")
+        print(f"[LINK] New link attempt")
+        print(f"[LINK] User: {interaction.user.name} ({interaction.user.id})")
+        print(f"[LINK] Username: {username}")
+        print(f"[LINK] Code: {code}")
+        print(f"{'='*60}\n")
         
-        # Verify via API (CASINO STYLE)
+        # Call API
         result = await api_call('/api/discord/link', {
             'username': username,
             'code': code
         })
         
+        print(f"\n[LINK] Result: {result}\n")
+        
         if result.get('success'):
+            growID = result.get('growID', username)
             embed = discord.Embed(
                 title="✅ Account Linked!",
-                description=f"Successfully linked to: **{result.get('growID')}**",
+                description=f"Successfully linked to: **{growID}**",
                 color=discord.Color.green()
             )
             embed.add_field(
@@ -161,22 +185,44 @@ class LinkModal(discord.ui.Modal, title="Link Your Account"):
             )
             await interaction.followup.send(embed=embed, ephemeral=True)
         else:
-            error = result.get('error', 'Unknown error')
-            await interaction.followup.send(
-                f"❌ **Link Failed**\n\n{error}\n\n**Steps:**\n"
-                f"1. Type `/linkvp` in-game\n"
-                f"2. Copy your **GrowID** and **6-digit code**\n"
-                f"3. Enter both here within 5 minutes",
-                ephemeral=True
+            error = result.get('error', 'Unknown error - server did not respond properly')
+            
+            embed = discord.Embed(
+                title="❌ Link Failed",
+                description=f"**Error:** {error}",
+                color=discord.Color.red()
             )
+            embed.add_field(
+                name="📝 Steps to Link",
+                value=(
+                    "1. Type `/linkvp` in-game\n"
+                    "2. Copy your **GrowID** (username)\n"
+                    "3. Copy the **6-digit code**\n"
+                    "4. Enter both here within 5 minutes"
+                ),
+                inline=False
+            )
+            embed.add_field(
+                name="❓ Common Issues",
+                value=(
+                    "• Code expired? Get a new one with `/linkvp`\n"
+                    "• Check your GrowID spelling\n"
+                    "• Make sure Discord is linked in-game first"
+                ),
+                inline=False
+            )
+            
+            await interaction.followup.send(embed=embed, ephemeral=True)
 
 # ============= EVENTS =============
 @bot.event
 async def on_ready():
-    print(f'[BOT] Logged in as {bot.user.name}')
+    print(f'\n{"="*60}')
+    print(f'[BOT] Logged in as {bot.user.name} ({bot.user.id})')
     print(f'[CONFIG] API: {API_BASE_URL}')
     print(f'[CONFIG] VP Channel: {VP_CHANNEL_ID}')
     print(f'[CONFIG] Gems Channel: {GEMS_CHANNEL_ID}')
+    print(f'{"="*60}\n')
     
     # Register persistent view
     bot.add_view(LinkButton())
@@ -186,7 +232,7 @@ async def on_ready():
     if not gems_task.is_running():
         gems_task.start()
     
-    print('[BOT] ✅ Ready!')
+    print('[BOT] ✅ Ready!\n')
 
 @bot.event
 async def on_voice_state_update(member, before, after):
@@ -258,6 +304,7 @@ async def vp_task():
                 user_voice_data[discord_id]['vp_start'] = now
     except Exception as e:
         print(f"[VP ERROR] {e}")
+        traceback.print_exc()
 
 @tasks.loop(seconds=GEMS_REFRESH)
 async def gems_task():
@@ -271,6 +318,7 @@ async def gems_task():
                 await add_gems_boost(str(member.id), GEMS_MULTIPLIER, GEMS_REFRESH)
     except Exception as e:
         print(f"[GEMS ERROR] {e}")
+        traceback.print_exc()
 
 # ============= COMMANDS =============
 @bot.tree.command(name='sendlink', description='[ADMIN] Send link button')
@@ -284,13 +332,20 @@ async def sendlink(interaction: discord.Interaction):
     )
     embed.add_field(
         name="🔗 How to Link",
-        value="1. Type `/linkvp` in-game\n2. Get your **GrowID** and **6-digit code**\n3. Click the button below\n4. Enter both",
+        value=(
+            "1. Type `/linkvp` in-game\n"
+            "2. Get your **GrowID** and **6-digit code**\n"
+            "3. Click the button below\n"
+            "4. Enter both within 5 minutes"
+        ),
         inline=False
     )
     embed.add_field(
         name="🎁 Rewards",
-        value=f"💰 **VP**: +{VP_AMOUNT} every {VP_INTERVAL//60} min in <#{VP_CHANNEL_ID}>\n"
-              f"💎 **Gems**: {GEMS_MULTIPLIER}x boost in <#{GEMS_CHANNEL_ID}>",
+        value=(
+            f"💰 **VP**: +{VP_AMOUNT} every {VP_INTERVAL//60} min in <#{VP_CHANNEL_ID}>\n"
+            f"💎 **Gems**: {GEMS_MULTIPLIER}x boost in <#{GEMS_CHANNEL_ID}>"
+        ),
         inline=False
     )
     
@@ -336,13 +391,14 @@ async def health_check(request):
 async def start_http_server():
     app = web.Application()
     app.router.add_get('/', health_check)
+    app.router.add_get('/health', health_check)
     
     port = int(os.getenv('PORT', '10000'))
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
-    print(f'[HTTP] Port {port}')
+    print(f'[HTTP] Health check on port {port}\n')
 
 # ============= MAIN =============
 async def main():
@@ -350,9 +406,10 @@ async def main():
     await bot.start(DISCORD_TOKEN)
 
 if __name__ == '__main__':
-    print("=" * 50)
-    print("DISCORD VP BOT - CASINO STYLE AUTH")
-    print("=" * 50)
+    print("="*60)
+    print("DISCORD VP BOT - ENHANCED ERROR HANDLING")
+    print("="*60)
+    print()
     
     try:
         asyncio.run(main())
