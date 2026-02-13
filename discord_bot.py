@@ -10,7 +10,7 @@ from aiohttp import web
 
 # ============= CONFIG =============
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN', 'YOUR_BOT_TOKEN')
-API_BASE_URL = os.getenv('API_BASE_URL', 'https://api.gtps.cloud/g-api/1782')
+API_BASE_URL = os.getenv('API_BASE_URL', 'https://api.gtps.cloud/g-api/18882')
 
 # Voice channels
 VP_CHANNEL_ID = int(os.getenv('VP_CHANNEL_ID', '1470057279511466045'))
@@ -43,7 +43,7 @@ bot = RewardsBot()
 # Voice tracking
 user_voice_data = defaultdict(lambda: {'vp_start': None, 'gems_start': None})
 
-# ============= API =============
+# ============= API (CASINO STYLE) =============
 async def api_call(endpoint, data):
     async with aiohttp.ClientSession() as session:
         try:
@@ -81,7 +81,7 @@ async def api_call(endpoint, data):
                     
         except asyncio.TimeoutError:
             print(f"[API ERROR] Timeout")
-            return {"success": False, "error": "Connection timeout - check server"}
+            return {"success": False, "error": "Connection timeout"}
         except Exception as e:
             print(f"[API ERROR] {type(e).__name__}: {e}")
             return {"success": False, "error": str(e)}
@@ -102,10 +102,10 @@ async def add_gems_boost(discord_id, multiplier, duration):
         'duration': duration
     })
 
-# ============= BUTTON VIEW =============
+# ============= BUTTON VIEW (CASINO STYLE: USERNAME + CODE) =============
 class LinkButton(discord.ui.View):
     def __init__(self):
-        super().__init__(timeout=None)  # Permanent button
+        super().__init__(timeout=None)
     
     @discord.ui.button(label="🔗 Link Account", style=discord.ButtonStyle.success, custom_id="vp_link_btn")
     async def link_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -113,9 +113,17 @@ class LinkButton(discord.ui.View):
         await interaction.response.send_modal(modal)
 
 class LinkModal(discord.ui.Modal, title="Link Your Account"):
+    username_input = discord.ui.TextInput(
+        label="GrowID (Username)",
+        placeholder="YourGrowID",
+        min_length=3,
+        max_length=18,
+        style=discord.TextStyle.short
+    )
+    
     code_input = discord.ui.TextInput(
-        label="Secret Code from /linkvp",
-        placeholder="ABC123",
+        label="6-Digit Code from /linkvp",
+        placeholder="123456",
         min_length=6,
         max_length=6,
         style=discord.TextStyle.short
@@ -124,15 +132,15 @@ class LinkModal(discord.ui.Modal, title="Link Your Account"):
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         
-        code = self.code_input.value.upper().strip()
-        discord_id = str(interaction.user.id)
+        username = self.username_input.value.strip()
+        code = self.code_input.value.strip()
         
-        print(f"[LINK] User {interaction.user.name} ({discord_id}) trying code: {code}")
+        print(f"[LINK] User {interaction.user.name} trying - Username: {username} | Code: {code}")
         
-        # Verify code via API
+        # Verify via API (CASINO STYLE)
         result = await api_call('/api/discord/link', {
-            'code': code,
-            'discordID': discord_id
+            'username': username,
+            'code': code
         })
         
         if result.get('success'):
@@ -157,8 +165,8 @@ class LinkModal(discord.ui.Modal, title="Link Your Account"):
             await interaction.followup.send(
                 f"❌ **Link Failed**\n\n{error}\n\n**Steps:**\n"
                 f"1. Type `/linkvp` in-game\n"
-                f"2. Copy the 6-digit code\n"
-                f"3. Enter it here within 5 minutes",
+                f"2. Copy your **GrowID** and **6-digit code**\n"
+                f"3. Enter both here within 5 minutes",
                 ephemeral=True
             )
 
@@ -276,7 +284,7 @@ async def sendlink(interaction: discord.Interaction):
     )
     embed.add_field(
         name="🔗 How to Link",
-        value="1. Type `/linkvp` in-game\n2. Get your 6-digit code\n3. Click the button below\n4. Enter your code",
+        value="1. Type `/linkvp` in-game\n2. Get your **GrowID** and **6-digit code**\n3. Click the button below\n4. Enter both",
         inline=False
     )
     embed.add_field(
@@ -343,7 +351,7 @@ async def main():
 
 if __name__ == '__main__':
     print("=" * 50)
-    print("DISCORD VP BOT - STARTING")
+    print("DISCORD VP BOT - CASINO STYLE AUTH")
     print("=" * 50)
     
     try:
