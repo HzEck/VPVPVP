@@ -10,20 +10,21 @@ from aiohttp import web
 
 # ============= CONFIG =============
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN', 'YOUR_BOT_TOKEN')
-
-# GTPS Cloud API - Simplified system
 API_BASE_URL = os.getenv('API_BASE_URL', 'https://api.gtps.cloud/g-api/1782')
 
 # Voice channels
 VP_CHANNEL_ID = int(os.getenv('VP_CHANNEL_ID', '1470057279511466045'))
 GEMS_CHANNEL_ID = int(os.getenv('GEMS_CHANNEL_ID', '1470057299631411444'))
 
+# Link channel - BURAYA BUTTON GÖNDERECEK
+LINK_CHANNEL_ID = int(os.getenv('LINK_CHANNEL_ID', '0'))  # Senin link kanalın
+
 # Reward settings
 VP_AMOUNT = 10
 VP_INTERVAL = 300  # 5 minutes
 GEMS_MULTIPLIER = 1.05
-GEMS_DURATION = 3600  # 1 hour
-GEMS_REFRESH = 60  # 1 minute
+GEMS_DURATION = 3600
+GEMS_REFRESH = 60
 
 # ============= BOT SETUP =============
 intents = discord.Intents.default()
@@ -45,13 +46,12 @@ bot = RewardsBot()
 # Voice tracking
 user_voice_data = defaultdict(lambda: {'vp_start': None, 'gems_start': None})
 
-# ============= API HELPERS =============
+# ============= API =============
 async def api_call(endpoint, data):
-    """Make API call to Lua server"""
     async with aiohttp.ClientSession() as session:
         try:
             url = f"{API_BASE_URL}{endpoint}"
-            print(f"[API] POST {url} | Data: {data}")
+            print(f"[API] POST {url}")
             
             async with session.post(
                 url, 
@@ -59,7 +59,6 @@ async def api_call(endpoint, data):
                 headers={'Content-Type': 'application/json'}, 
                 timeout=aiohttp.ClientTimeout(total=10)
             ) as response:
-                
                 text = await response.text()
                 print(f"[API] Response ({response.status}): {text[:200]}")
                 
@@ -74,113 +73,142 @@ async def api_call(endpoint, data):
             return {"success": False, "error": str(e)}
 
 async def get_profile(discord_id):
-    """Get user profile from Lua"""
     return await api_call('/api/discord/get', {'discordID': str(discord_id)})
 
 async def add_vp(discord_id, amount):
-    """Add VP to user"""
     return await api_call('/api/discord/reward/vp', {
         'discordID': str(discord_id), 
         'amount': amount
     })
 
 async def add_gems_boost(discord_id, multiplier, duration):
-    """Add gems boost to user"""
     return await api_call('/api/discord/reward/gems', {
         'discordID': str(discord_id), 
         'multiplier': multiplier, 
         'duration': duration
     })
 
+# ============= BUTTON VIEW =============
+class LinkButton(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)  # Permanent button
+    
+    @discord.ui.button(label="🔗 Link Account", style=discord.ButtonStyle.success, custom_id="vp_link_btn")
+    async def link_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        modal = LinkModal()
+        await interaction.response.send_modal(modal)
+
+class LinkModal(discord.ui.Modal, title="Link Your Account"):
+    code_input = discord.ui.TextInput(
+        label="Secret Code from /linkvp",
+        placeholder="ABC123",
+        min_length=6,
+        max_length=6,
+        style=discord.TextStyle.short
+    )
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        
+        code = self.code_input.value.upper().strip()
+        discord_id = str(interaction.user.id)
+        
+        print(f"[LINK] User {interaction.user.name} trying code: {code}")
+        
+        # Verify code via API
+        result = await api_call('/api/discord/link', {
+            'code': code,
+            'discordID': discord_id
+        })
+        
+        if result.get('success'):
+            embed = discord.Embed(
+                title="✅ Account Linked!",
+                description=f"Successfully linked to: **{result.get('growID')}**",
+                color=discord.Color.green()
+            )
+            embed.add_field(
+                name="💰 Earn VP",
+                value=f"Join <#{VP_CHANNEL_ID}> to earn **{VP_AMOUNT} VP** every **{VP_INTERVAL//60} minutes**",
+                inline=False
+            )
+            embed.add_field(
+                name="💎 Gems Boost",
+                value=f"Join <#{GEMS_CHANNEL_ID}> for **{GEMS_MULTIPLIER}x** gems boost in-game",
+                inline=False
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        else:
+            error = result.get('error', 'Unknown error')
+            await interaction.followup.send(
+                f"❌ **Link Failed**\n\n{error}\n\nUse `/linkvp` in-game to get a new code!",
+                ephemeral=True
+            )
+
 # ============= EVENTS =============
 @bot.event
 async def on_ready():
-    print(f'[BOT] Logged in as {bot.user.name} ({bot.user.id})')
+    print(f'[BOT] Logged in as {bot.user.name}')
     print(f'[CONFIG] API: {API_BASE_URL}')
     print(f'[CONFIG] VP Channel: {VP_CHANNEL_ID}')
     print(f'[CONFIG] Gems Channel: {GEMS_CHANNEL_ID}')
-    print(f'[CONFIG] VP: +{VP_AMOUNT} every {VP_INTERVAL//60} min')
-    print(f'[CONFIG] Gems: {GEMS_MULTIPLIER}x boost')
+    
+    # Register persistent view
+    bot.add_view(LinkButton())
     
     if not vp_task.is_running():
         vp_task.start()
-        print('[TASK] VP reward task started')
-    
     if not gems_task.is_running():
         gems_task.start()
-        print('[TASK] Gems boost task started')
     
     print('[BOT] ✅ Ready!')
 
 @bot.event
 async def on_voice_state_update(member, before, after):
-    """Handle voice channel join/leave"""
     if member.bot:
         return
     
     discord_id = str(member.id)
     now = datetime.now()
     
-    # ===== VP CHANNEL =====
-    # Joined VP channel
+    # VP Channel
     if after.channel and after.channel.id == VP_CHANNEL_ID:
         if user_voice_data[discord_id]['vp_start'] is None:
             user_voice_data[discord_id]['vp_start'] = now
-            print(f"[VP] ✅ {member.name} joined VP channel")
-    
-    # Left VP channel
+            print(f"[VP] ✅ {member.name} joined")
     elif before.channel and before.channel.id == VP_CHANNEL_ID:
-        if user_voice_data[discord_id]['vp_start'] is not None:
-            duration = (now - user_voice_data[discord_id]['vp_start']).total_seconds()
-            print(f"[VP] ❌ {member.name} left VP channel (was there {duration//60:.0f} min)")
-            user_voice_data[discord_id]['vp_start'] = None
+        user_voice_data[discord_id]['vp_start'] = None
+        print(f"[VP] ❌ {member.name} left")
     
-    # ===== GEMS CHANNEL =====
-    # Joined Gems channel
+    # Gems Channel
     if after.channel and after.channel.id == GEMS_CHANNEL_ID:
         if user_voice_data[discord_id]['gems_start'] is None:
             user_voice_data[discord_id]['gems_start'] = now
-            print(f"[GEMS] ✅ {member.name} joined Gems channel")
+            print(f"[GEMS] ✅ {member.name} joined")
             
-            # Activate boost immediately
             result = await add_gems_boost(discord_id, GEMS_MULTIPLIER, GEMS_DURATION)
-            
             if result.get('success'):
-                print(f"[GEMS] ✅ Boost activated for {member.name}")
                 try:
                     await member.send(
                         f"💎 **Gems Boost Activated!**\n"
                         f"Multiplier: **{GEMS_MULTIPLIER}x**\n"
-                        f"Duration: **{GEMS_DURATION//60} minutes**\n\n"
-                        f"Break blocks in-game to earn bonus gems!"
+                        f"Duration: **{GEMS_DURATION//60} minutes**"
                     )
                 except:
-                    print(f"[GEMS] ⚠️ Couldn't DM {member.name}")
-            else:
-                print(f"[GEMS] ❌ Failed to activate boost: {result.get('error')}")
-    
-    # Left Gems channel
+                    pass
     elif before.channel and before.channel.id == GEMS_CHANNEL_ID:
-        if user_voice_data[discord_id]['gems_start'] is not None:
-            duration = (now - user_voice_data[discord_id]['gems_start']).total_seconds()
-            print(f"[GEMS] ❌ {member.name} left Gems channel (was there {duration//60:.0f} min)")
-            user_voice_data[discord_id]['gems_start'] = None
+        user_voice_data[discord_id]['gems_start'] = None
+        print(f"[GEMS] ❌ {member.name} left")
 
 # ============= TASKS =============
 @tasks.loop(seconds=VP_INTERVAL)
 async def vp_task():
-    """Give VP to users in VP channel every interval"""
     try:
         channel = bot.get_channel(VP_CHANNEL_ID)
-        if not channel:
-            print(f"[VP TASK] ⚠️ Channel {VP_CHANNEL_ID} not found")
+        if not channel or len(channel.members) == 0:
             return
         
-        if len(channel.members) == 0:
-            return  # No one in channel
-        
         now = datetime.now()
-        rewarded = 0
         
         for member in channel.members:
             if member.bot:
@@ -189,148 +217,96 @@ async def vp_task():
             discord_id = str(member.id)
             start_time = user_voice_data[discord_id]['vp_start']
             
-            if start_time:
-                elapsed = (now - start_time).total_seconds()
+            if start_time and (now - start_time).total_seconds() >= VP_INTERVAL:
+                result = await add_vp(discord_id, VP_AMOUNT)
                 
-                # Give reward if user has been in channel for full interval
-                if elapsed >= VP_INTERVAL:
-                    result = await add_vp(discord_id, VP_AMOUNT)
-                    
-                    if result.get('success'):
-                        total_vp = result.get('totalVP', 0)
-                        print(f"[VP] ✅ +{VP_AMOUNT} VP to {member.name} (Total: {total_vp})")
-                        rewarded += 1
-                        
-                        try:
-                            await member.send(
-                                f"💰 **+{VP_AMOUNT} VP!**\n"
-                                f"Total VP: **{total_vp:,}**\n\n"
-                                f"Keep staying in <#{VP_CHANNEL_ID}> to earn more!"
-                            )
-                        except:
-                            pass
-                    else:
-                        print(f"[VP] ❌ Failed to give VP to {member.name}: {result.get('error')}")
-                    
-                    # Reset timer
-                    user_voice_data[discord_id]['vp_start'] = now
-        
-        if rewarded > 0:
-            print(f"[VP TASK] ✅ Rewarded {rewarded} user(s)")
-    
+                if result.get('success'):
+                    total_vp = result.get('totalVP', 0)
+                    print(f"[VP] ✅ +{VP_AMOUNT} to {member.name} (Total: {total_vp})")
+                    try:
+                        await member.send(f"💰 **+{VP_AMOUNT} VP!** Total: **{total_vp:,}**")
+                    except:
+                        pass
+                
+                user_voice_data[discord_id]['vp_start'] = now
     except Exception as e:
-        print(f"[VP TASK ERROR] {e}")
+        print(f"[VP ERROR] {e}")
 
 @tasks.loop(seconds=GEMS_REFRESH)
 async def gems_task():
-    """Refresh gems boost for users in Gems channel"""
     try:
         channel = bot.get_channel(GEMS_CHANNEL_ID)
-        if not channel:
-            print(f"[GEMS TASK] ⚠️ Channel {GEMS_CHANNEL_ID} not found")
+        if not channel or len(channel.members) == 0:
             return
         
-        if len(channel.members) == 0:
-            return  # No one in channel
-        
-        refreshed = 0
-        
         for member in channel.members:
-            if member.bot:
-                continue
-            
-            discord_id = str(member.id)
-            
-            # Refresh boost
-            result = await add_gems_boost(discord_id, GEMS_MULTIPLIER, GEMS_REFRESH)
-            
-            if result.get('success'):
-                refreshed += 1
-            else:
-                print(f"[GEMS] ❌ Failed to refresh boost for {member.name}")
-        
-        if refreshed > 0:
-            print(f"[GEMS TASK] ✅ Refreshed boost for {refreshed} user(s)")
-    
+            if not member.bot:
+                await add_gems_boost(str(member.id), GEMS_MULTIPLIER, GEMS_REFRESH)
     except Exception as e:
-        print(f"[GEMS TASK ERROR] {e}")
+        print(f"[GEMS ERROR] {e}")
 
 # ============= COMMANDS =============
-@bot.tree.command(name='profile', description='Check your Discord Rewards profile')
+@bot.tree.command(name='sendlink', description='[ADMIN] Send link button')
+@app_commands.checks.has_permissions(administrator=True)
+async def sendlink(interaction: discord.Interaction):
+    """Send the link button to current channel"""
+    embed = discord.Embed(
+        title="🎮 Link Your Account",
+        description="Connect your Growtopia account to earn Discord rewards!",
+        color=discord.Color.blue()
+    )
+    embed.add_field(
+        name="📝 How to Link",
+        value="1. Type `/linkvp` in-game\n2. Get your 6-digit code\n3. Click the button below\n4. Enter your code",
+        inline=False
+    )
+    embed.add_field(
+        name="🎁 Rewards",
+        value=f"💰 **VP**: +{VP_AMOUNT} every {VP_INTERVAL//60} min in <#{VP_CHANNEL_ID}>\n"
+              f"💎 **Gems**: {GEMS_MULTIPLIER}x boost in <#{GEMS_CHANNEL_ID}>",
+        inline=False
+    )
+    
+    await interaction.channel.send(embed=embed, view=LinkButton())
+    await interaction.response.send_message("✅ Button sent!", ephemeral=True)
+
+@bot.tree.command(name='profile', description='Check your VP profile')
 async def profile(interaction: discord.Interaction):
-    """Show user's VP and boost status"""
     await interaction.response.defer(ephemeral=True)
     
-    discord_id = str(interaction.user.id)
-    result = await get_profile(discord_id)
+    result = await get_profile(str(interaction.user.id))
     
     if result.get('success'):
-        grow_id = result.get('growID', 'Unknown')
-        total_vp = result.get('totalVP', 0)
-        
-        embed = discord.Embed(
-            title="🎮 Your Profile",
-            color=discord.Color.blue()
-        )
-        embed.add_field(name="GrowID", value=f"`{grow_id}`", inline=False)
-        embed.add_field(name="Total VP Earned", value=f"**{total_vp:,}** VP", inline=False)
-        embed.add_field(
-            name="How to Earn More",
-            value=f"💰 Join <#{VP_CHANNEL_ID}> to earn **{VP_AMOUNT} VP** every **{VP_INTERVAL//60} minutes**\n"
-                  f"💎 Join <#{GEMS_CHANNEL_ID}> for **{GEMS_MULTIPLIER}x** gems boost in-game",
-            inline=False
-        )
-        
+        embed = discord.Embed(title="🎮 Your Profile", color=discord.Color.blue())
+        embed.add_field(name="GrowID", value=f"`{result.get('growID')}`", inline=False)
+        embed.add_field(name="Total VP", value=f"**{result.get('totalVP', 0):,}** VP", inline=False)
         await interaction.followup.send(embed=embed, ephemeral=True)
     else:
         await interaction.followup.send(
-            "❌ **Profile not found**\n\n"
-            "Make sure you've linked your Discord account to Growtopia!\n"
-            "Your account will be automatically created when you join a voice channel.",
+            "❌ **Not Linked**\n\nUse `/linkvp` in-game and click the link button!",
             ephemeral=True
         )
 
-@bot.tree.command(name='rewards', description='Show rewards information')
+@bot.tree.command(name='rewards', description='Show rewards info')
 async def rewards(interaction: discord.Interaction):
-    """Show rewards info"""
-    embed = discord.Embed(
-        title="🎁 Discord Voice Rewards",
-        description="Earn rewards by joining voice channels!",
-        color=discord.Color.gold()
-    )
-    
+    embed = discord.Embed(title="🎁 Voice Rewards", color=discord.Color.gold())
     embed.add_field(
-        name="💰 VP (Voice Points)",
-        value=f"**Channel:** <#{VP_CHANNEL_ID}>\n"
-              f"**Reward:** +{VP_AMOUNT} VP every {VP_INTERVAL//60} minutes\n"
-              f"**Usage:** Spend VP in `/vpshop` in-game",
+        name="💰 VP",
+        value=f"<#{VP_CHANNEL_ID}>\n+{VP_AMOUNT} VP every {VP_INTERVAL//60} min",
         inline=False
     )
-    
     embed.add_field(
-        name="💎 Gems Boost",
-        value=f"**Channel:** <#{GEMS_CHANNEL_ID}>\n"
-              f"**Boost:** {GEMS_MULTIPLIER}x gems from breaking blocks\n"
-              f"**Duration:** Active while in channel + {GEMS_DURATION//60} min after leaving",
+        name="💎 Gems",
+        value=f"<#{GEMS_CHANNEL_ID}>\n{GEMS_MULTIPLIER}x boost",
         inline=False
     )
-    
-    embed.add_field(
-        name="ℹ️ Requirements",
-        value="Your Discord account must be linked to Growtopia.\n"
-              "Accounts are automatically created when you join a voice channel.",
-        inline=False
-    )
-    
     await interaction.response.send_message(embed=embed)
 
 # ============= HEALTH CHECK =============
 async def health_check(request):
-    """Health check endpoint for Render"""
     return web.Response(text="OK", status=200)
 
 async def start_http_server():
-    """Start HTTP server for Render health checks"""
     app = web.Application()
     app.router.add_get('/', health_check)
     
@@ -339,24 +315,19 @@ async def start_http_server():
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
-    print(f'[HTTP] Health check server started on port {port}')
+    print(f'[HTTP] Port {port}')
 
 # ============= MAIN =============
 async def main():
-    """Main function"""
     await start_http_server()
     await bot.start(DISCORD_TOKEN)
 
 if __name__ == '__main__':
     print("=" * 50)
-    print("DISCORD VOICE REWARDS BOT - STARTING")
-    print("=" * 50)
-    print(f"API: {API_BASE_URL}")
-    print(f"VP Channel: {VP_CHANNEL_ID}")
-    print(f"Gems Channel: {GEMS_CHANNEL_ID}")
+    print("DISCORD VP BOT - STARTING")
     print("=" * 50)
     
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n[BOT] Stopped by user")
+        print("\n[BOT] Stopped")
