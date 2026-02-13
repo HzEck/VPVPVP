@@ -46,61 +46,73 @@ user_voice_data = defaultdict(lambda: {'vp_start': None, 'gems_start': None})
 
 # ============= API (IMPROVED ERROR HANDLING) =============
 async def api_call(endpoint, data):
-    async with aiohttp.ClientSession() as session:
-        try:
-            url = f"{API_BASE_URL}{endpoint}"
-            print(f"\n[API] >>> POST {url}")
-            print(f"[API] >>> Data: {data}")
-            
-            async with session.post(
-                url, 
-                json=data, 
-                headers={'Content-Type': 'application/json'},
-                timeout=aiohttp.ClientTimeout(total=15)
-            ) as response:
-                status = response.status
+    """Try multiple API base URLs"""
+    
+    # Try different base URLs
+    base_urls = [
+        f"{API_BASE_URL}/casino",  # /casino prefix
+        f"{API_BASE_URL}/vp",      # /vp prefix  
+        API_BASE_URL,               # No prefix
+    ]
+    
+    last_error = None
+    
+    for base_url in base_urls:
+        async with aiohttp.ClientSession() as session:
+            try:
+                url = f"{base_url}{endpoint}"
+                print(f"\n[API] >>> Trying: {url}")
+                print(f"[API] >>> Data: {data}")
                 
-                # Get response text first
-                text = await response.text()
-                print(f"[API] <<< Status: {status}")
-                print(f"[API] <<< Raw Response: {text[:500]}")
-                
-                # Handle empty response
-                if not text or text.strip() == "":
-                    print("[API] ERROR: Empty response from server")
-                    return {"success": False, "error": "Server returned empty response"}
-                
-                # Try to parse JSON
-                try:
-                    result = await response.json(content_type=None)  # Ignore content-type
-                    print(f"[API] <<< Parsed: {result}")
-                except Exception as parse_error:
-                    print(f"[API] ERROR: JSON parse failed - {parse_error}")
-                    print(f"[API] ERROR: Raw text: {text}")
-                    return {"success": False, "error": f"Invalid JSON response: {text[:100]}"}
-                
-                # Handle HTTP errors
-                if status == 403:
-                    return {"success": False, "error": result.get('error', 'Forbidden')}
-                elif status == 400:
-                    return {"success": False, "error": result.get('error', 'Bad request')}
-                elif status == 404:
-                    return {"success": False, "error": result.get('error', 'Not found')}
-                elif status >= 400:
-                    return {"success": False, "error": f"Server error ({status}): {result.get('error', 'Unknown')}"}
-                
-                return result
+                async with session.post(
+                    url, 
+                    json=data, 
+                    headers={'Content-Type': 'application/json'},
+                    timeout=aiohttp.ClientTimeout(total=10)
+                ) as response:
+                    status = response.status
                     
-        except asyncio.TimeoutError:
-            print(f"[API] ERROR: Request timeout")
-            return {"success": False, "error": "Connection timeout - server not responding"}
-        except aiohttp.ClientError as e:
-            print(f"[API] ERROR: Connection failed - {type(e).__name__}: {e}")
-            return {"success": False, "error": f"Connection failed: {str(e)}"}
-        except Exception as e:
-            print(f"[API] ERROR: Unexpected error - {type(e).__name__}: {e}")
-            traceback.print_exc()
-            return {"success": False, "error": f"Unexpected error: {str(e)}"}
+                    # Get response text first
+                    text = await response.text()
+                    print(f"[API] <<< Status: {status}")
+                    print(f"[API] <<< Response preview: {text[:200]}")
+                    
+                    # Check if Cloudflare challenge
+                    if 'Just a moment' in text or 'cloudflare' in text.lower():
+                        print(f"[API] ⚠️ Cloudflare challenge detected, trying next URL...")
+                        last_error = {"success": False, "error": "Cloudflare protection"}
+                        continue
+                    
+                    # Handle empty response
+                    if not text or text.strip() == "":
+                        print("[API] ⚠️ Empty response, trying next URL...")
+                        last_error = {"success": False, "error": "Empty response"}
+                        continue
+                    
+                    # Try to parse JSON
+                    try:
+                        result = await response.json(content_type=None)
+                        print(f"[API] ✅ Success with {base_url}")
+                        print(f"[API] <<< Parsed: {result}")
+                        return result
+                    except Exception as parse_error:
+                        print(f"[API] ⚠️ JSON parse failed: {parse_error}")
+                        print(f"[API] Raw: {text[:300]}")
+                        last_error = {"success": False, "error": f"Invalid JSON: {text[:100]}"}
+                        continue
+                        
+            except asyncio.TimeoutError:
+                print(f"[API] ⚠️ Timeout with {base_url}")
+                last_error = {"success": False, "error": "Timeout"}
+                continue
+            except Exception as e:
+                print(f"[API] ⚠️ Error with {base_url}: {e}")
+                last_error = {"success": False, "error": str(e)}
+                continue
+    
+    # All attempts failed
+    print(f"[API] ❌ All endpoints failed!")
+    return last_error or {"success": False, "error": "All API endpoints failed"}
 
 async def get_profile(discord_id):
     return await api_call('/api/discord/get', {'discordID': str(discord_id)})
