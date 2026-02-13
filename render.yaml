@@ -9,7 +9,7 @@ services:
       - key: DISCORD_TOKEN
         sync: false
       - key: API_BASE_URL
-        value: http://localhost:17091/casino
+        value: https://api.gtps.cloud/g-api/1782
       - key: VP_CHANNEL_ID
         value: "1470057279511466045"
       - key: GEMS_CHANNEL_ID
