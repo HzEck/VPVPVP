@@ -7,7 +7,7 @@ import os
 from datetime import datetime
 from collections import defaultdict
 from aiohttp import web
-import traceback
+import json
 
 # ============= CONFIG =============
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN', 'YOUR_BOT_TOKEN')
@@ -44,251 +44,161 @@ bot = RewardsBot()
 # Voice tracking
 user_voice_data = defaultdict(lambda: {'vp_start': None, 'gems_start': None})
 
-# ============= API (IMPROVED ERROR HANDLING) =============
+# ============= GTPS CLOUD API =============
 async def api_call(endpoint, data):
-    """Try multiple API base URLs"""
+    """GTPS Cloud API call - simplified and fixed"""
     
-    # Try different base URLs
-    base_urls = [
-        f"{API_BASE_URL}/casino",  # /casino prefix
-        f"{API_BASE_URL}/vp",      # /vp prefix  
-        API_BASE_URL,               # No prefix
-    ]
-    
-    last_error = None
-    
-    for base_url in base_urls:
-        async with aiohttp.ClientSession() as session:
-            try:
-                url = f"{base_url}{endpoint}"
-                print(f"\n[API] >>> Trying: {url}")
-                print(f"[API] >>> Data: {data}")
+    async with aiohttp.ClientSession() as session:
+        try:
+            url = f"{API_BASE_URL}{endpoint}"
+            
+            print(f"\n[API] >>> POST {url}")
+            print(f"[API] >>> Data: {json.dumps(data, indent=2)}")
+            
+            # GTPS Cloud'a özel headers
+            headers = {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+                'User-Agent': 'DiscordVPBot/1.0'
+            }
+            
+            async with session.post(
+                url, 
+                json=data,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=15),
+                allow_redirects=False  # Cloudflare redirect'i önle
+            ) as response:
+                status = response.status
+                text = await response.text()
                 
-                async with session.post(
-                    url, 
-                    json=data, 
-                    headers={'Content-Type': 'application/json'},
-                    timeout=aiohttp.ClientTimeout(total=10)
-                ) as response:
-                    status = response.status
+                print(f"[API] <<< Status: {status}")
+                print(f"[API] <<< Response: {text[:500]}")
+                
+                # Cloudflare check
+                if 'cloudflare' in text.lower() or 'just a moment' in text.lower():
+                    print("[API] ⚠️ Cloudflare protection detected")
+                    return {"success": False, "error": "Cloudflare protection"}
+                
+                # Empty response
+                if not text or text.strip() == "":
+                    print("[API] ⚠️ Empty response")
+                    return {"success": False, "error": "Server returned empty response"}
+                
+                # Parse JSON
+                try:
+                    result = json.loads(text)
+                    print(f"[API] ✅ Success!")
+                    return result
+                except json.JSONDecodeError as e:
+                    print(f"[API] ❌ JSON parse error: {e}")
+                    print(f"[API] Raw text: {text}")
                     
-                    # Get response text first
-                    text = await response.text()
-                    print(f"[API] <<< Status: {status}")
-                    print(f"[API] <<< Response preview: {text[:200]}")
+                    # Lua might return plain text sometimes
+                    if text.startswith('{') and text.endswith('}'):
+                        # Try manual parse
+                        return {"success": False, "error": "Invalid JSON", "raw": text}
                     
-                    # Check if Cloudflare challenge
-                    if 'Just a moment' in text or 'cloudflare' in text.lower():
-                        print(f"[API] ⚠️ Cloudflare challenge detected, trying next URL...")
-                        last_error = {"success": False, "error": "Cloudflare protection"}
-                        continue
+                    return {"success": False, "error": "Invalid response format"}
                     
-                    # Handle empty response
-                    if not text or text.strip() == "":
-                        print("[API] ⚠️ Empty response, trying next URL...")
-                        last_error = {"success": False, "error": "Empty response"}
-                        continue
-                    
-                    # Try to parse JSON
-                    try:
-                        result = await response.json(content_type=None)
-                        print(f"[API] ✅ Success with {base_url}")
-                        print(f"[API] <<< Parsed: {result}")
-                        return result
-                    except Exception as parse_error:
-                        print(f"[API] ⚠️ JSON parse failed: {parse_error}")
-                        print(f"[API] Raw: {text[:300]}")
-                        last_error = {"success": False, "error": f"Invalid JSON: {text[:100]}"}
-                        continue
-                        
-            except asyncio.TimeoutError:
-                print(f"[API] ⚠️ Timeout with {base_url}")
-                last_error = {"success": False, "error": "Timeout"}
-                continue
-            except Exception as e:
-                print(f"[API] ⚠️ Error with {base_url}: {e}")
-                last_error = {"success": False, "error": str(e)}
-                continue
-    
-    # All attempts failed
-    print(f"[API] ❌ All endpoints failed!")
-    return last_error or {"success": False, "error": "All API endpoints failed"}
+        except asyncio.TimeoutError:
+            print("[API] ❌ Timeout")
+            return {"success": False, "error": "Request timeout"}
+        except Exception as e:
+            print(f"[API] ❌ Error: {e}")
+            return {"success": False, "error": str(e)}
+
+async def link_account(username, code, discord_id):
+    """Link account - FIXED endpoint"""
+    return await api_call('/api/discord/link', {
+        'username': username,
+        'code': code,
+        'discordID': str(discord_id)
+    })
 
 async def get_profile(discord_id):
-    return await api_call('/api/discord/get', {'discordID': str(discord_id)})
+    """Get profile"""
+    return await api_call('/api/discord/get', {
+        'discordID': str(discord_id)
+    })
 
 async def add_vp(discord_id, amount):
+    """Add VP"""
     return await api_call('/api/discord/reward/vp', {
-        'discordID': str(discord_id), 
+        'discordID': str(discord_id),
         'amount': amount
     })
 
 async def add_gems_boost(discord_id, multiplier, duration):
+    """Add gems boost"""
     return await api_call('/api/discord/reward/gems', {
-        'discordID': str(discord_id), 
-        'multiplier': multiplier, 
+        'discordID': str(discord_id),
+        'multiplier': multiplier,
         'duration': duration
     })
-
-# ============= BUTTON VIEW =============
-class LinkButton(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-    
-    @discord.ui.button(label="🔗 Link Account", style=discord.ButtonStyle.success, custom_id="vp_link_btn")
-    async def link_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        modal = LinkModal()
-        await interaction.response.send_modal(modal)
-
-class LinkModal(discord.ui.Modal, title="Link Your Account"):
-    username_input = discord.ui.TextInput(
-        label="GrowID (Username)",
-        placeholder="YourGrowID",
-        min_length=3,
-        max_length=18,
-        style=discord.TextStyle.short
-    )
-    
-    code_input = discord.ui.TextInput(
-        label="6-Digit Code from /linkvp",
-        placeholder="123456",
-        min_length=6,
-        max_length=6,
-        style=discord.TextStyle.short
-    )
-    
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        
-        username = self.username_input.value.strip()
-        code = self.code_input.value.strip()
-        
-        print(f"\n{'='*60}")
-        print(f"[LINK] New link attempt")
-        print(f"[LINK] User: {interaction.user.name} ({interaction.user.id})")
-        print(f"[LINK] Username: {username}")
-        print(f"[LINK] Code: {code}")
-        print(f"{'='*60}\n")
-        
-        # Call API
-        result = await api_call('/api/discord/link', {
-            'username': username,
-            'code': code
-        })
-        
-        print(f"\n[LINK] Result: {result}\n")
-        
-        if result.get('success'):
-            growID = result.get('growID', username)
-            embed = discord.Embed(
-                title="✅ Account Linked!",
-                description=f"Successfully linked to: **{growID}**",
-                color=discord.Color.green()
-            )
-            embed.add_field(
-                name="💰 Earn VP",
-                value=f"Join <#{VP_CHANNEL_ID}> to earn **{VP_AMOUNT} VP** every **{VP_INTERVAL//60} minutes**",
-                inline=False
-            )
-            embed.add_field(
-                name="💎 Gems Boost",
-                value=f"Join <#{GEMS_CHANNEL_ID}> for **{GEMS_MULTIPLIER}x** gems boost in-game",
-                inline=False
-            )
-            await interaction.followup.send(embed=embed, ephemeral=True)
-        else:
-            error = result.get('error', 'Unknown error - server did not respond properly')
-            
-            embed = discord.Embed(
-                title="❌ Link Failed",
-                description=f"**Error:** {error}",
-                color=discord.Color.red()
-            )
-            embed.add_field(
-                name="📝 Steps to Link",
-                value=(
-                    "1. Type `/linkvp` in-game\n"
-                    "2. Copy your **GrowID** (username)\n"
-                    "3. Copy the **6-digit code**\n"
-                    "4. Enter both here within 5 minutes"
-                ),
-                inline=False
-            )
-            embed.add_field(
-                name="❓ Common Issues",
-                value=(
-                    "• Code expired? Get a new one with `/linkvp`\n"
-                    "• Check your GrowID spelling\n"
-                    "• Make sure Discord is linked in-game first"
-                ),
-                inline=False
-            )
-            
-            await interaction.followup.send(embed=embed, ephemeral=True)
 
 # ============= EVENTS =============
 @bot.event
 async def on_ready():
-    print(f'\n{"="*60}')
-    print(f'[BOT] Logged in as {bot.user.name} ({bot.user.id})')
-    print(f'[CONFIG] API: {API_BASE_URL}')
-    print(f'[CONFIG] VP Channel: {VP_CHANNEL_ID}')
-    print(f'[CONFIG] Gems Channel: {GEMS_CHANNEL_ID}')
-    print(f'{"="*60}\n')
+    print(f'\n[BOT] ✅ Logged in as {bot.user.name}')
+    print(f'[BOT] 🔗 API: {API_BASE_URL}')
+    print(f'[BOT] 💰 VP Channel: {VP_CHANNEL_ID}')
+    print(f'[BOT] 💎 Gems Channel: {GEMS_CHANNEL_ID}')
     
-    # Register persistent view
-    bot.add_view(LinkButton())
-    
+    # Tasks başlat
     if not vp_task.is_running():
         vp_task.start()
     if not gems_task.is_running():
         gems_task.start()
     
-    print('[BOT] ✅ Ready!\n')
+    print('[BOT] 🚀 Ready!\n')
 
 @bot.event
 async def on_voice_state_update(member, before, after):
+    """Ses kanalı değişiklikleri"""
     if member.bot:
         return
     
     discord_id = str(member.id)
     now = datetime.now()
     
-    # VP Channel
+    # VP kanalı
     if after.channel and after.channel.id == VP_CHANNEL_ID:
         if user_voice_data[discord_id]['vp_start'] is None:
             user_voice_data[discord_id]['vp_start'] = now
-            print(f"[VP] ✅ {member.name} joined")
+            print(f"[VP] {member.name} joined VP channel")
     elif before.channel and before.channel.id == VP_CHANNEL_ID:
         user_voice_data[discord_id]['vp_start'] = None
-        print(f"[VP] ❌ {member.name} left")
+        print(f"[VP] {member.name} left VP channel")
     
-    # Gems Channel
+    # Gems kanalı
     if after.channel and after.channel.id == GEMS_CHANNEL_ID:
         if user_voice_data[discord_id]['gems_start'] is None:
             user_voice_data[discord_id]['gems_start'] = now
-            print(f"[GEMS] ✅ {member.name} joined")
+            print(f"[GEMS] {member.name} joined Gems channel")
             
+            # Boost ver
             result = await add_gems_boost(discord_id, GEMS_MULTIPLIER, GEMS_DURATION)
             if result.get('success'):
                 try:
                     await member.send(
                         f"💎 **Gems Boost Activated!**\n"
-                        f"Multiplier: **{GEMS_MULTIPLIER}x**\n"
-                        f"Duration: **{GEMS_DURATION//60} minutes**"
+                        f"• Multiplier: **{GEMS_MULTIPLIER}x**\n"
+                        f"• Duration: **{GEMS_DURATION // 60} minutes**"
                     )
                 except:
                     pass
     elif before.channel and before.channel.id == GEMS_CHANNEL_ID:
         user_voice_data[discord_id]['gems_start'] = None
-        print(f"[GEMS] ❌ {member.name} left")
+        print(f"[GEMS] {member.name} left Gems channel")
 
 # ============= TASKS =============
 @tasks.loop(seconds=VP_INTERVAL)
 async def vp_task():
+    """VP ödülü ver"""
     try:
         channel = bot.get_channel(VP_CHANNEL_ID)
-        if not channel or len(channel.members) == 0:
+        if not channel:
             return
         
         now = datetime.now()
@@ -300,107 +210,212 @@ async def vp_task():
             discord_id = str(member.id)
             start_time = user_voice_data[discord_id]['vp_start']
             
-            if start_time and (now - start_time).total_seconds() >= VP_INTERVAL:
-                result = await add_vp(discord_id, VP_AMOUNT)
+            if start_time:
+                elapsed = (now - start_time).total_seconds()
                 
-                if result.get('success'):
-                    total_vp = result.get('totalVP', 0)
-                    print(f"[VP] ✅ +{VP_AMOUNT} to {member.name} (Total: {total_vp})")
-                    try:
-                        await member.send(f"💰 **+{VP_AMOUNT} VP!** Total: **{total_vp:,}**")
-                    except:
-                        pass
-                else:
-                    print(f"[VP] ❌ Failed for {member.name}: {result.get('error')}")
-                
-                user_voice_data[discord_id]['vp_start'] = now
+                if elapsed >= VP_INTERVAL:
+                    result = await add_vp(discord_id, VP_AMOUNT)
+                    
+                    if result.get('success'):
+                        print(f"[VP] ✅ Gave {VP_AMOUNT} VP to {member.name}")
+                        
+                        try:
+                            await member.send(
+                                f"💰 **VP Earned!**\n"
+                                f"• Amount: **+{VP_AMOUNT} VP**\n"
+                                f"• Total: **{result.get('totalVP', 0)}**\n"
+                                f"• Time: **{int(elapsed / 60)} minutes**"
+                            )
+                        except:
+                            pass
+                    else:
+                        if result.get('error') == 'Not linked':
+                            try:
+                                await member.send(
+                                    "❌ **Account Not Linked**\n"
+                                    "Type `/linkvp` in Growtopia to link your account!"
+                                )
+                            except:
+                                pass
+                    
+                    user_voice_data[discord_id]['vp_start'] = now
+    
     except Exception as e:
         print(f"[VP ERROR] {e}")
-        traceback.print_exc()
 
 @tasks.loop(seconds=GEMS_REFRESH)
 async def gems_task():
+    """Gems boost refresh"""
     try:
         channel = bot.get_channel(GEMS_CHANNEL_ID)
-        if not channel or len(channel.members) == 0:
+        if not channel:
             return
         
         for member in channel.members:
-            if not member.bot:
-                await add_gems_boost(str(member.id), GEMS_MULTIPLIER, GEMS_REFRESH)
+            if member.bot:
+                continue
+            
+            discord_id = str(member.id)
+            await add_gems_boost(discord_id, GEMS_MULTIPLIER, GEMS_REFRESH)
+    
     except Exception as e:
         print(f"[GEMS ERROR] {e}")
-        traceback.print_exc()
 
 # ============= COMMANDS =============
-@bot.tree.command(name='sendlink', description='[ADMIN] Send link button')
-@app_commands.checks.has_permissions(administrator=True)
-async def sendlink(interaction: discord.Interaction):
-    """Send the link button to current channel"""
-    embed = discord.Embed(
-        title="🎮 Link Your Account",
-        description="Connect your Growtopia account to earn Discord rewards!",
-        color=discord.Color.blue()
-    )
-    embed.add_field(
-        name="🔗 How to Link",
-        value=(
-            "1. Type `/linkvp` in-game\n"
-            "2. Get your **GrowID** and **6-digit code**\n"
-            "3. Click the button below\n"
-            "4. Enter both within 5 minutes"
-        ),
-        inline=False
-    )
-    embed.add_field(
-        name="🎁 Rewards",
-        value=(
-            f"💰 **VP**: +{VP_AMOUNT} every {VP_INTERVAL//60} min in <#{VP_CHANNEL_ID}>\n"
-            f"💎 **Gems**: {GEMS_MULTIPLIER}x boost in <#{GEMS_CHANNEL_ID}>"
-        ),
-        inline=False
-    )
-    
-    await interaction.channel.send(embed=embed, view=LinkButton())
-    await interaction.response.send_message("✅ Button sent!", ephemeral=True)
-
-@bot.tree.command(name='profile', description='Check your VP profile')
-async def profile(interaction: discord.Interaction):
+@bot.tree.command(name='linkvp', description='Link your Growtopia account')
+@app_commands.describe(
+    username='Your GrowID (Growtopia username)',
+    code='6-digit code from /linkvp command in-game'
+)
+async def linkvp(interaction: discord.Interaction, username: str, code: str):
+    """Link account - FIXED"""
     await interaction.response.defer(ephemeral=True)
     
-    result = await get_profile(str(interaction.user.id))
+    username = username.strip()
+    code = code.upper().strip()
+    discord_id = str(interaction.user.id)
+    
+    print(f"\n[LINK CMD] User: {interaction.user.name}")
+    print(f"[LINK CMD] GrowID: {username}")
+    print(f"[LINK CMD] Code: {code}")
+    print(f"[LINK CMD] Discord ID: {discord_id}")
+    
+    result = await link_account(username, code, discord_id)
+    
+    print(f"[LINK CMD] Result: {result}")
     
     if result.get('success'):
-        embed = discord.Embed(title="🎮 Your Profile", color=discord.Color.blue())
-        embed.add_field(name="GrowID", value=f"`{result.get('growID')}`", inline=False)
-        embed.add_field(name="Total VP", value=f"**{result.get('totalVP', 0):,}** VP", inline=False)
+        embed = discord.Embed(
+            title="✅ Account Linked!",
+            description=f"Successfully linked your accounts!",
+            color=discord.Color.green()
+        )
+        embed.add_field(name="Discord", value=interaction.user.mention, inline=False)
+        embed.add_field(name="GrowID", value=f"`{username}`", inline=False)
+        embed.add_field(
+            name="🎁 Rewards Active",
+            value=f"• <#{VP_CHANNEL_ID}> → **{VP_AMOUNT} VP** every {VP_INTERVAL // 60} min\n"
+                  f"• <#{GEMS_CHANNEL_ID}> → **{GEMS_MULTIPLIER}x gems boost**",
+            inline=False
+        )
+        
+        await interaction.followup.send(embed=embed, ephemeral=True)
+    else:
+        error = result.get('error', 'Unknown error')
+        
+        embed = discord.Embed(
+            title="❌ Link Failed",
+            description=f"Error: `{error}`",
+            color=discord.Color.red()
+        )
+        embed.add_field(
+            name="📝 Steps to Link",
+            value="1. Type `/linkvp` in-game\n"
+                  "2. Copy your **GrowID** (username)\n"
+                  "3. Copy the **6-digit code**\n"
+                  "4. Enter both here within 5 minutes",
+            inline=False
+        )
+        embed.add_field(
+            name="⚠️ Common Issues",
+            value="• Code expired? Get a new one with `/linkvp`\n"
+                  "• Check your GrowID spelling\n"
+                  "• Make sure you're using the latest code",
+            inline=False
+        )
+        
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+@bot.tree.command(name='profile', description='Check your linked account')
+async def profile(interaction: discord.Interaction):
+    """Profil göster"""
+    await interaction.response.defer(ephemeral=True)
+    
+    discord_id = str(interaction.user.id)
+    
+    result = await get_profile(discord_id)
+    
+    if result.get('success'):
+        growid = result.get('growID', 'Unknown')
+        total_vp = result.get('totalVP', 0)
+        
+        embed = discord.Embed(
+            title="🎮 Your Profile",
+            color=discord.Color.blue()
+        )
+        embed.add_field(name="Discord", value=interaction.user.mention, inline=False)
+        embed.add_field(name="GrowID", value=f"`{growid}`", inline=False)
+        embed.add_field(name="Total VP", value=f"**{total_vp:,}**", inline=False)
+        
         await interaction.followup.send(embed=embed, ephemeral=True)
     else:
         await interaction.followup.send(
-            "❌ **Not Linked**\n\nUse `/linkvp` in-game and click the link button!",
+            "❌ **Not Linked**\n"
+            "Use `/linkvp <username> <code>` to link your account!\n"
+            "Get code with `/linkvp` command in Growtopia.",
             ephemeral=True
         )
 
-@bot.tree.command(name='rewards', description='Show rewards info')
+@bot.tree.command(name='rewards', description='View reward system')
 async def rewards(interaction: discord.Interaction):
-    embed = discord.Embed(title="🎁 Voice Rewards", color=discord.Color.gold())
+    """Ödül bilgisi"""
+    embed = discord.Embed(
+        title="🎁 Voice Rewards System",
+        description="Earn rewards by staying in voice channels!",
+        color=discord.Color.gold()
+    )
+    
     embed.add_field(
-        name="💰 VP",
-        value=f"<#{VP_CHANNEL_ID}>\n+{VP_AMOUNT} VP every {VP_INTERVAL//60} min",
+        name="💰 VP Channel",
+        value=f"<#{VP_CHANNEL_ID}>\n"
+              f"• Earn **{VP_AMOUNT} VP** every **{VP_INTERVAL // 60} minutes**",
         inline=False
     )
+    
     embed.add_field(
-        name="💎 Gems",
-        value=f"<#{GEMS_CHANNEL_ID}>\n{GEMS_MULTIPLIER}x boost",
+        name="💎 Gems Boost Channel",
+        value=f"<#{GEMS_CHANNEL_ID}>\n"
+              f"• Get **{GEMS_MULTIPLIER}x gems** multiplier\n"
+              f"• Lasts **{GEMS_DURATION // 60} minutes**",
         inline=False
     )
+    
+    embed.add_field(
+        name="📝 How to Start",
+        value="1. Type `/linkvp` in Growtopia\n"
+              "2. Copy your GrowID and code\n"
+              "3. Use `/linkvp <username> <code>` here\n"
+              "4. Join voice channels!",
+        inline=False
+    )
+    
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name='help', description='Show help')
+async def help_cmd(interaction: discord.Interaction):
+    """Yardım"""
+    embed = discord.Embed(
+        title="🤖 Bot Commands",
+        color=discord.Color.purple()
+    )
+    
+    embed.add_field(
+        name="/linkvp <username> <code>",
+        value="Link your Growtopia account",
+        inline=False
+    )
+    embed.add_field(name="/profile", value="View your stats", inline=False)
+    embed.add_field(name="/rewards", value="View reward info", inline=False)
+    embed.add_field(name="/help", value="Show this message", inline=False)
+    
     await interaction.response.send_message(embed=embed)
 
 # ============= HEALTH CHECK =============
 async def health_check(request):
-    return web.Response(text="OK", status=200)
+    return web.Response(text="VP Bot is running!", status=200)
 
 async def start_http_server():
+    """HTTP server for Render"""
     app = web.Application()
     app.router.add_get('/', health_check)
     app.router.add_get('/health', health_check)
@@ -410,7 +425,7 @@ async def start_http_server():
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
-    print(f'[HTTP] Health check on port {port}\n')
+    print(f'[HTTP] Health check on port {port}')
 
 # ============= MAIN =============
 async def main():
@@ -418,12 +433,18 @@ async def main():
     await bot.start(DISCORD_TOKEN)
 
 if __name__ == '__main__':
-    print("="*60)
-    print("DISCORD VP BOT - ENHANCED ERROR HANDLING")
-    print("="*60)
-    print()
+    print("\n" + "="*50)
+    print("    DISCORD VP REWARDS BOT")
+    print("="*50)
+    print(f"API: {API_BASE_URL}")
+    print(f"VP Channel: {VP_CHANNEL_ID}")
+    print(f"Gems Channel: {GEMS_CHANNEL_ID}")
+    print("="*50 + "\n")
     
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\n[BOT] Stopped")
+    if DISCORD_TOKEN == 'YOUR_BOT_TOKEN':
+        print("[ERROR] Set DISCORD_TOKEN!")
+    else:
+        try:
+            asyncio.run(main())
+        except KeyboardInterrupt:
+            print("\n[BOT] Shutting down...")
