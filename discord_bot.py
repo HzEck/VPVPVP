@@ -18,7 +18,7 @@ GEMS_CHANNEL_ID = int(os.getenv('GEMS_CHANNEL_ID', '1470057299631411444'))
 
 # Reward settings
 VP_AMOUNT = 10
-VP_INTERVAL = 180  # 3 minutes (was 5)
+VP_INTERVAL = 5  # 3 minutes (was 5)
 GEMS_MULTIPLIER = 1.05
 
 # ============= DATA STORAGE =============
