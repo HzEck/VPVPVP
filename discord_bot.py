@@ -16,9 +16,6 @@ API_BASE_URL = os.getenv('API_BASE_URL', 'https://api.gtps.cloud/g-api/1782')
 VP_CHANNEL_ID = int(os.getenv('VP_CHANNEL_ID', '1470057279511466045'))
 GEMS_CHANNEL_ID = int(os.getenv('GEMS_CHANNEL_ID', '1470057299631411444'))
 
-# Link channel - BURAYA BUTTON GÖNDERECEK
-LINK_CHANNEL_ID = int(os.getenv('LINK_CHANNEL_ID', '0'))  # Senin link kanalın
-
 # Reward settings
 VP_AMOUNT = 10
 VP_INTERVAL = 300  # 5 minutes
@@ -52,6 +49,7 @@ async def api_call(endpoint, data):
         try:
             url = f"{API_BASE_URL}{endpoint}"
             print(f"[API] POST {url}")
+            print(f"[API] Data: {data}")
             
             async with session.post(
                 url, 
@@ -60,16 +58,32 @@ async def api_call(endpoint, data):
                 timeout=aiohttp.ClientTimeout(total=10)
             ) as response:
                 text = await response.text()
-                print(f"[API] Response ({response.status}): {text[:200]}")
+                print(f"[API] Response ({response.status}): {text[:500]}")
                 
-                if response.status != 200:
-                    return {"success": False, "error": f"HTTP {response.status}"}
+                # Try to parse JSON
+                try:
+                    result = await response.json()
+                except:
+                    print(f"[API] Failed to parse JSON: {text[:200]}")
+                    return {"success": False, "error": f"Invalid response from server"}
                 
-                result = await response.json()
+                # Handle status codes
+                if response.status == 403:
+                    return {"success": False, "error": result.get('error', 'Invalid or expired code')}
+                elif response.status == 400:
+                    return {"success": False, "error": result.get('error', 'Bad request')}
+                elif response.status == 404:
+                    return {"success": False, "error": result.get('error', 'Not found')}
+                elif response.status != 200:
+                    return {"success": False, "error": f"Server error ({response.status})"}
+                
                 return result
                     
+        except asyncio.TimeoutError:
+            print(f"[API ERROR] Timeout")
+            return {"success": False, "error": "Connection timeout - check server"}
         except Exception as e:
-            print(f"[API ERROR] {e}")
+            print(f"[API ERROR] {type(e).__name__}: {e}")
             return {"success": False, "error": str(e)}
 
 async def get_profile(discord_id):
@@ -113,7 +127,7 @@ class LinkModal(discord.ui.Modal, title="Link Your Account"):
         code = self.code_input.value.upper().strip()
         discord_id = str(interaction.user.id)
         
-        print(f"[LINK] User {interaction.user.name} trying code: {code}")
+        print(f"[LINK] User {interaction.user.name} ({discord_id}) trying code: {code}")
         
         # Verify code via API
         result = await api_call('/api/discord/link', {
@@ -141,7 +155,10 @@ class LinkModal(discord.ui.Modal, title="Link Your Account"):
         else:
             error = result.get('error', 'Unknown error')
             await interaction.followup.send(
-                f"❌ **Link Failed**\n\n{error}\n\nUse `/linkvp` in-game to get a new code!",
+                f"❌ **Link Failed**\n\n{error}\n\n**Steps:**\n"
+                f"1. Type `/linkvp` in-game\n"
+                f"2. Copy the 6-digit code\n"
+                f"3. Enter it here within 5 minutes",
                 ephemeral=True
             )
 
@@ -227,6 +244,8 @@ async def vp_task():
                         await member.send(f"💰 **+{VP_AMOUNT} VP!** Total: **{total_vp:,}**")
                     except:
                         pass
+                else:
+                    print(f"[VP] ❌ Failed for {member.name}: {result.get('error')}")
                 
                 user_voice_data[discord_id]['vp_start'] = now
     except Exception as e:
@@ -256,7 +275,7 @@ async def sendlink(interaction: discord.Interaction):
         color=discord.Color.blue()
     )
     embed.add_field(
-        name="📝 How to Link",
+        name="🔗 How to Link",
         value="1. Type `/linkvp` in-game\n2. Get your 6-digit code\n3. Click the button below\n4. Enter your code",
         inline=False
     )
